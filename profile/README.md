@@ -51,4 +51,4 @@ We're always open to collaboration and feedback.
 
 ---
 
-> *“AI needs good data like engines need good fuel. We make it easy to collect, clean, and control yours.”*> — The inmydata Team
+> *“AI needs good data like engines need good fuel. We make it easy to collect, clean, and control yours.”* — The inmydata Team
