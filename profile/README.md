@@ -8,13 +8,13 @@
 
 We're building a unified platform that simplifies building Agentic AI solutions with data across your organization—whether you're a data scientist, analyst, engineer, or business leader.
 
-🔹 **Conversational Analytics**Empower decision-makers with natural language access to your data—no SQL required.
+🔹 **Conversational Analytics** Empower decision-makers with natural language access to your data—no SQL required.
 
-🔹 **Data Preparation & Pipelines**Connect, clean, and transform data from multiple sources with ease.
+🔹 **Data Preparation & Pipelines** Connect, clean, and transform data from multiple sources with ease.
 
-🔹 **Secure Data Exposure for AI Projects**Safely expose curated datasets to your AI agents and LLM applications with built-in governance.
+🔹 **Secure Data Exposure for AI Projects** Safely expose curated datasets to your AI agents and LLM applications with built-in governance.
 
-🔹 **AI Consultancy**We work with businesses to design, build, and scale AI solutions—powered by trusted data.
+🔹 **AI Consultancy** We work with businesses to design, build, and scale AI solutions—powered by trusted data.
 
 ---
 
