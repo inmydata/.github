@@ -1,6 +1,6 @@
 # 👋 Welcome to inmydata
 
-**inmydata** is a data platform designed for the AI era. We help teams unlock the full value of their data through powerful tools for **data preparation**, **governance**, and **secure access**—all with **AI-native capabilities** built in.
+**inmydata** is a data platform designed for the AI era. We help teams unlock the full value of their data through powerful tools for **data preparation**, **governance**, and **secure access**—and enable teams to build agentic AI solutions powered by trusted data.
 
 ---
 
@@ -38,6 +38,9 @@ Explore our GitHub to see what we're working on:
 - 💡 [`openedge-component-examples`](https://github.com/inmydata/openedge-component-examples): Use inmydata Windows Forms analytics in Progress OpenEdge GUI for .NET.
 - 🧩 [`dotnet-component-examples`](https://github.com/inmydata/dotnet-component-examples): C# WinForms client using inmydata analytics components.
 - 🧪 [`agent-examples`](https://github.com/inmydata/agent-examples): Sample use cases for the inmydata agents Python library.
+- 🐍 [`PUG-Challenge-2025`](https://github.com/inmydata/PUG-Challenge-2025): Examples and source for our PUG Challenge 2025 Workshop.
+- ⚙️ [`AgentMCP`](https://github.com/inmydata/AgentMCP): An MCP server that enables AI agents to access inmydata's powerful data querying capabilities through a standardized interface.
+- 🎧 [`LiveKit_mcp_client`](https://github.com/inmydata/LiveKit_mcp_client): LiveKit MCP client (Python).
 
 (Repositories may be private if under active development—get in touch if you're interested in early access.)
 
@@ -47,7 +50,7 @@ Explore our GitHub to see what we're working on:
 
 We're always open to collaboration and feedback.
 
-🌐 [Website](https://inmydata.ai)💬 [LinkedIn](https://linkedin.com/company/inmydata)📨 [Contact Us](https://inmydata.ai/contact-us)
+🌐 [Website](https://inmydata.ai) 💬 [LinkedIn](https://linkedin.com/company/inmydata) 📨 [Contact Us](https://inmydata.ai/contact-us)
 
 ---
 
