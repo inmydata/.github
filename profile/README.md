@@ -33,6 +33,7 @@ We believe that access to clean, governed, and usable data is the foundation of 
 Explore our GitHub to see what we're working on:
 
 - 🧠 [`agents`](https://github.com/inmydata/agents): Python library to build AI agents that access data from the inmydata platform.
+- 🧠 [`openedge-agents`]([https://github.com/inmydata/openedge-agents](https://github.com/inmydata/openedge-agents)): Python library to build AI agents that access data from the PAS or Classic AppServer.
 - 🌐 [`web-components`](https://github.com/inmydata/web-components): WebComponents-based custom HTML elements to embed AI copilots, insights, and dashboards.
 - 🖥️ [`openedge-gui-component-examples`](https://github.com/inmydata/openedge-gui-component-examples): Examples of integrating inmydata OCX components in Progress OpenEdge GUI apps.
 - 💡 [`openedge-component-examples`](https://github.com/inmydata/openedge-component-examples): Use inmydata Windows Forms analytics in Progress OpenEdge GUI for .NET.
