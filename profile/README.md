@@ -42,6 +42,7 @@ Explore our GitHub to see what we're working on:
 - 🐍 [`PUG-Challenge-2025`](https://github.com/inmydata/PUG-Challenge-2025): Examples and source for our PUG Challenge 2025 Workshop.
 - ⚙️ [`AgentMCP`](https://github.com/inmydata/AgentMCP): An MCP server that enables AI agents to access inmydata's powerful data querying capabilities through a standardized interface.
 - 🎧 [`LiveKit_mcp_client`](https://github.com/inmydata/LiveKit_mcp_client): LiveKit MCP client (Python).
+- ⚙️ [`OpenEdgeAgentMCP`](https://github.com/inmydata/OpenEdgeAgentMCP): An MCP server that enables AI agents to access PAS and Classic AppServer's via inmydata's powerful ABL data querying capabilities through a standardized interface.
 
 (Repositories may be private if under active development—get in touch if you're interested in early access.)
 
