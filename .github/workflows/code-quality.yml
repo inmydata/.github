@@ -36,10 +36,24 @@ on:
   workflow_call:
     inputs:
       imdcq-url:
-        description: Base URL of the imdcq service.
+        # Normally left unset: the default below is the shared instance, and
+        # this workflow is itself the one shared copy, so changing it there
+        # changes it for every repository at once. The input exists to override
+        # it for a single caller - pointing at a staging instance, say.
+        #
+        # Deliberately not an organisation variable: those require GitHub Team
+        # or Enterprise on private repositories, and per-repository variables
+        # would mean configuring this in every calling repo. The URL is not a
+        # secret, so holding it here costs nothing.
+        # SET THIS before publishing the workflow. It must be a URL the runner
+        # can actually reach: GitHub-hosted runners are on the public internet,
+        # so an internal-only host will not resolve however it is spelled. If
+        # imdcq is not publicly reachable, run this job on a self-hosted runner
+        # inside the network instead (change `runs-on` below).
+        description: Base URL of the imdcq service. Defaults to the shared instance.
         required: false
         type: string
-        default: https://imdcq.inmydata.com
+        default: 'http://52.142.163.48:9010/'
       project-key:
         description: SonarQube project key. Defaults to the repository name.
         required: false
@@ -87,10 +101,12 @@ jobs:
           [ -z "${SONAR_TOKEN:-}" ] && missing="$missing SONAR_TOKEN"
           [ -z "${SONAR_HOST_URL:-}" ] && missing="$missing SONAR_HOST_URL"
           if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing. Define them as repository or"\
-                 "organisation secrets, and ensure the caller passes 'secrets: inherit'."\
-                 "If they are organisation secrets, check the repository is in scope"\
-                 "under the secret's repository access policy."
+            echo "::error::Missing secret(s):$missing in ${GITHUB_REPOSITORY}."\
+                 "'secrets: inherit' passes the CALLING repository's secrets - secrets"\
+                 "defined on the .github repository that hosts this workflow are never"\
+                 "used. Define them as organisation secrets on the inmydata org (with"\
+                 "this repository in scope under the secret's repository access policy),"\
+                 "or as repository secrets on ${GITHUB_REPOSITORY} itself."
             exit 1
           fi
 
@@ -117,6 +133,16 @@ jobs:
           # something to read even if this one fails outright. imdcq is a
           # reporting tool and must never break anyone's build (design SS5.3.3).
           echo '{"rules":[],"issues":[]}' > reports/imdcq.json
+
+          # Without a URL there is nowhere to post. Warn and skip rather than
+          # letting curl fail against "/v1/analyse" with no host, which produces
+          # an error that does not point at the missing configuration.
+          if [ -z "${IMDCQ_URL:-}" ]; then
+            echo "::warning::IMDCQ_URL is empty - skipping imdcq analysis."\
+                 "Set the imdcq-url default in the shared workflow, or pass the"\
+                 "imdcq-url input from this caller. Sonar analysis continues."
+            exit 0
+          fi
 
           TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imdcq" | jq -r '.value')"
@@ -180,7 +206,7 @@ jobs:
           fi
 
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
