@@ -53,7 +53,7 @@ on:
         description: Base URL of the imdcq service. Defaults to the shared instance.
         required: false
         type: string
-        default: 'http://52.142.163.48:9010/'
+        default: 'https://interparliamentary-abatedly-anja.ngrok-free.dev:9010/'
       project-key:
         description: SonarQube project key. Defaults to the repository name.
         required: false
