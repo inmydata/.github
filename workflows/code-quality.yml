@@ -1,0 +1,159 @@
+# Shared reusable workflow for imdcq + SonarQube analysis.
+#
+# THIS FILE DOES NOT LIVE HERE. It belongs in the organisation's `.github`
+# repository at `.github/workflows/code-quality.yml` (design SS9) - it is org
+# infrastructure called by every project, and keeping it out of the imdcq
+# repository avoids coupling every repo's build to imdcq's release cycle. It is
+# committed here as the reference copy to publish.
+#
+# Participating repositories carry only a short caller block:
+#
+#   jobs:
+#     quality:
+#       uses: inmydata/.github/.github/workflows/code-quality.yml@main
+#       secrets: inherit
+#
+# Calling a reusable workflow from a private repository requires that
+# repository's Actions access settings to permit access from repositories in the
+# organisation - worth setting once when the central repo is created.
+
+name: Code quality
+
+on:
+  workflow_call:
+    inputs:
+      imdcq-url:
+        description: Base URL of the imdcq service.
+        required: false
+        type: string
+        default: https://imdcq.inmydata.com
+      project-key:
+        description: SonarQube project key. Defaults to the repository name.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+
+permissions:
+  contents: read
+  # Required for the OIDC token imdcq authenticates with. This is the whole of
+  # the CI -> imdcq credential: short-lived, nothing to rotate (design SS7).
+  id-token: write
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          # Sonar needs full history to attribute issues to authors and dates.
+          fetch-depth: 0
+
+      - name: Generate run id
+        id: run
+        run: echo "id=$(uuidgen)" >> "$GITHUB_OUTPUT"
+
+      # imdcq must run BEFORE the scanner. `sonar.externalIssuesReportPaths` is
+      # a scanner parameter: the scanner reads the report from this runner's
+      # filesystem and folds it into its upload. There is no server-side API to
+      # push generic issues into SonarQube (ADR-003).
+      - name: Run imdcq analysis
+        id: imdcq
+        continue-on-error: true
+        env:
+          IMDCQ_URL: ${{ inputs.imdcq-url }}
+          PROJECT_KEY: ${{ inputs.project-key || github.event.repository.name }}
+          RUN_ID: ${{ steps.run.outputs.id }}
+        run: |
+          set -uo pipefail
+          mkdir -p reports
+
+          # An empty but valid report is written first, so every later step has
+          # something to read even if this one fails outright. imdcq is a
+          # reporting tool and must never break anyone's build (design SS5.3.3).
+          echo '{"rules":[],"issues":[]}' > reports/imdcq.json
+
+          TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imdcq" | jq -r '.value')"
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::warning::could not obtain an OIDC token; skipping imdcq analysis"
+            exit 0
+          fi
+
+          # Collect the sources imdcq's checks apply to. Excluded directories are
+          # filtered here as well as server-side to keep the payload small.
+          python3 - <<'PY' > payload.json
+          import json, os, pathlib
+
+          SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
+          EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts'}
+
+          files = []
+          for root, dirs, names in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith('.')]
+              for name in names:
+                  path = pathlib.Path(root, name)
+                  if path.suffix not in EXTENSIONS or path.name.endswith('.d.ts'):
+                      continue
+                  try:
+                      files.append({
+                          'path': str(path).replace('\\', '/').removeprefix('./'),
+                          'content': path.read_text(encoding='utf-8'),
+                      })
+                  except (UnicodeDecodeError, OSError):
+                      continue
+
+          ignore = pathlib.Path('.imdcqignore')
+          if ignore.exists():
+              files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
+
+          print(json.dumps({
+              'repositoryId': int(os.environ['GITHUB_REPOSITORY_ID']),
+              'projectKey': os.environ['PROJECT_KEY'],
+              'branch': os.environ.get('GITHUB_REF_NAME', 'main'),
+              'commitSha': os.environ['GITHUB_SHA'],
+              'runId': os.environ['RUN_ID'],
+              'files': files,
+          }))
+          PY
+
+          # Hard timeout matching the service's own budget (design SS5.3.3).
+          # --fail-with-body so a non-2xx response is an error but still readable.
+          if curl -sS --fail-with-body --max-time 200 \
+              -X POST "$IMDCQ_URL/v1/analyse" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data @payload.json -o response.json; then
+            jq '.report' response.json > reports/imdcq.json
+            echo "imdcq measures:"
+            jq -c '.measures' response.json
+          else
+            # Fail open: keep the empty report and let the scanner proceed.
+            echo "::warning::imdcq analysis failed; continuing with an empty report"
+            head -c 500 response.json 2>/dev/null || true
+          fi
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ inputs.project-key || github.event.repository.name }}
+            -Dsonar.externalIssuesReportPaths=reports/imdcq.json
+            -Dsonar.analysis.imdcqRunId=${{ steps.run.outputs.id }}
+
+      # Deliberately NOT running sonarqube-quality-gate-action.
+      #
+      # `sonarqube-scan-action` uploads and exits without failing on gate status,
+      # which is the behaviour we want while the system is reporting-only
+      # (decision 1). Adding the gate action is the single step that would turn
+      # this into a merge blocker, so its absence is deliberate rather than an
+      # oversight. Revisit only once the false-positive rate is understood.
