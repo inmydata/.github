@@ -11,7 +11,20 @@
 #   jobs:
 #     quality:
 #       uses: inmydata/.github/.github/workflows/code-quality.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
 #       secrets: inherit
+#
+# The caller MUST grant id-token: write. The permissions block below is a ceiling
+# this workflow operates within, not a request that escalates - a reusable
+# workflow cannot hold more permission than its caller. Omitting it fails with
+# "requesting 'id-token: write', but is only allowed 'id-token: none'".
+# Note that `secrets: inherit` does not cover this: secrets and permissions are
+# separate mechanisms. The same error also appears when the org-level Workflow
+# permissions default is restrictive (Settings -> Actions -> General), or when
+# the caller declares a top-level permissions block that omits id-token - such a
+# block is exhaustive, so unlisted scopes drop to none.
 #
 # Calling a reusable workflow from a private repository requires that
 # repository's Actions access settings to permit access from repositories in the
@@ -32,11 +45,17 @@ on:
         required: false
         type: string
         default: ''
+    # Declared optional deliberately. A `required: true` secret is validated at
+    # call time, and that check does not see secrets arriving via
+    # `secrets: inherit` - so callers using inherit fail with "Secret
+    # SONAR_TOKEN is required, but not provided while calling" even when the
+    # repository defines it. Marking them optional lets inherit supply them, and
+    # the preflight step below fails with a message that says what to do.
     secrets:
       SONAR_TOKEN:
-        required: true
+        required: false
       SONAR_HOST_URL:
-        required: true
+        required: false
 
 permissions:
   contents: read
@@ -53,6 +72,27 @@ jobs:
         with:
           # Sonar needs full history to attribute issues to authors and dates.
           fetch-depth: 0
+
+      # The secrets are declared optional so that `secrets: inherit` works (see
+      # the note above), which means their absence has to be caught here instead
+      # of by the call-time check. Failing with a specific message beats letting
+      # the scanner fail later with an authentication error that does not say
+      # which secret is missing or where to define it.
+      - name: Check Sonar secrets are present
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          missing=""
+          [ -z "${SONAR_TOKEN:-}" ] && missing="$missing SONAR_TOKEN"
+          [ -z "${SONAR_HOST_URL:-}" ] && missing="$missing SONAR_HOST_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secret(s):$missing. Define them as repository or"\
+                 "organisation secrets, and ensure the caller passes 'secrets: inherit'."\
+                 "If they are organisation secrets, check the repository is in scope"\
+                 "under the secret's repository access policy."
+            exit 1
+          fi
 
       - name: Generate run id
         id: run
