@@ -1,0 +1,170 @@
+# Shared reusable workflow for imdcq documentation-quality backfill.
+#
+# THIS FILE DOES NOT LIVE HERE. Like code-quality.yml, it belongs in the
+# organisation's `.github` repository - at `.github/workflows/code-quality-backfill.yml`.
+# It is committed here as the reference copy to publish.
+#
+# Deliberately separate from code-quality.yml so the per-push analyse path is
+# untouched: a mistake in the backfill logic cannot break normal CI runs.
+#
+# WHY THIS WORKFLOW EXISTS
+#
+# A backfill needs two things that live in different places: the repository's
+# source files, which only a runner has (imdcq has no GitHub access, ADR-006),
+# and an admin's approval of the cost, which only a human can give (design
+# SS5.3.5 - "an admin should never start a paid operation of unknown size").
+# This workflow supplies the files; the admin supplies the approval, as a
+# short-lived confirmation token minted in the imdcq UI. Neither is sufficient
+# alone: a workflow cannot authorise its own spend.
+#
+# HOW TO RUN ONE (two dispatches)
+#
+#   1. Dispatch with no confirmation token. The job prints the estimate and
+#      stops without spending anything.
+#   2. Approve that figure in imdcq (repository screen -> Approve backfill cost),
+#      copy the token, and dispatch again with it pasted in.
+#
+# The token names the repository and the approved figure, expires in 30 minutes,
+# and is refused if the estimate has since grown beyond it - so the number the
+# admin looked at is the number that gets spent.
+
+name: Code quality backfill
+
+on:
+  workflow_call:
+    inputs:
+      imdcq-url:
+        description: Base URL of the imdcq service.
+        required: false
+        type: string
+        default: 'http://52.142.163.48:9010'
+      confirmation:
+        description: >-
+          Confirmation token from imdcq. Leave empty for a dry run that only
+          prints the estimate.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  # The OIDC token proves which repository is supplying the files. It does not,
+  # on its own, authorise any spend.
+  id-token: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Estimate, and start if confirmed
+        env:
+          IMDCQ_URL: ${{ inputs.imdcq-url }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${IMDCQ_URL:-}" ]; then
+            echo "::error::IMDCQ_URL is empty - set the imdcq-url default in the shared workflow."
+            exit 1
+          fi
+          IMDCQ_URL="${IMDCQ_URL%/}"
+
+          TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imdcq" | jq -r '.value')"
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::could not obtain an OIDC token"
+            exit 1
+          fi
+
+          # The same collector the analyse workflow uses, so the file set a
+          # backfill judges is exactly the file set that gets measured.
+          python3 - <<'PY' > payload.json
+          import json, os, pathlib
+
+          SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
+          EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts'}
+
+          files = []
+          for root, dirs, names in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith('.')]
+              for name in names:
+                  path = pathlib.Path(root, name)
+                  if path.suffix not in EXTENSIONS or path.name.endswith('.d.ts'):
+                      continue
+                  try:
+                      files.append({
+                          'path': str(path).replace('\\', '/').removeprefix('./'),
+                          'content': path.read_text(encoding='utf-8'),
+                      })
+                  except (UnicodeDecodeError, OSError):
+                      continue
+
+          ignore = pathlib.Path('.imdcqignore')
+          if ignore.exists():
+              files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
+
+          print(json.dumps({'files': files, 'batched': True}))
+          PY
+
+          echo "Collected $(jq '.files | length' payload.json) files."
+
+          REPO_ID="$GITHUB_REPOSITORY_ID"
+
+          # --- Always estimate first, whether or not this run will spend -------
+          if ! curl -sS --fail-with-body --max-time 120 \
+              -X POST "$IMDCQ_URL/v1/repositories/$REPO_ID/backfill/estimate/ci" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H 'Content-Type: application/json' \
+              --data @payload.json -o estimate.json; then
+            echo "::error::estimate failed"
+            cat estimate.json 2>/dev/null | head -c 500
+            exit 1
+          fi
+
+          COST="$(jq -r '.estimatedCostUsd' estimate.json)"
+          {
+            echo "### imdcq backfill estimate"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Files to judge | $(jq -r '.filesToJudge' estimate.json) of $(jq -r '.filesTotal' estimate.json) |"
+            echo "| Unjudged items | $(jq -r '.unjudgedItems' estimate.json) |"
+            echo "| Already judged (skipped) | $(jq -r '.filesSkipped' estimate.json) files |"
+            echo "| Estimated cost | \$$COST |"
+            echo "| Model | $(jq -r '.model' estimate.json) |"
+            echo "| Estimated duration | $(jq -r '.estimatedDuration' estimate.json) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "${CONFIRMATION:-}" ]; then
+            {
+              echo ""
+              echo "**Dry run — nothing was spent.** To run this backfill:"
+              echo "1. Approve \$$COST in imdcq on this repository's screen."
+              echo "2. Re-dispatch this workflow with the confirmation token."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Dry run: estimated \$$COST. Re-dispatch with a confirmation token to run it."
+            exit 0
+          fi
+
+          # --- Confirmed: start the job ---------------------------------------
+          if ! curl -sS --fail-with-body --max-time 120 \
+              -X POST "$IMDCQ_URL/v1/repositories/$REPO_ID/backfill/ci" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "X-Imdcq-Confirmation: $CONFIRMATION" \
+              -H 'Content-Type: application/json' \
+              --data @payload.json -o job.json; then
+            # A refused confirmation is the expected failure here - expired,
+            # for another repository, or the estimate outgrew the approval.
+            echo "::error::backfill was refused: $(jq -r '.detail // "unknown"' job.json 2>/dev/null)"
+            exit 1
+          fi
+
+          JOB_ID="$(jq -r '.id' job.json)"
+          echo "::notice::Backfill started: job $JOB_ID"
+          {
+            echo ""
+            echo "**Backfill started** — job \`$JOB_ID\`. Track progress on the repository screen in imdcq."
+          } >> "$GITHUB_STEP_SUMMARY"
