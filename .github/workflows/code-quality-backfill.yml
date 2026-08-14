@@ -37,7 +37,7 @@ on:
         description: Base URL of the imdcq service.
         required: false
         type: string
-        default: 'https://interparliamentary-abatedly-anja.ngrok-free.dev :9010'
+        default: 'https://interparliamentary-abatedly-anja.ngrok-free.dev'
       confirmation:
         description: >-
           Confirmation token from imdcq. Leave empty for a dry run that only
