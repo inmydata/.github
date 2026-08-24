@@ -1,4 +1,4 @@
-# Shared reusable workflow for imdcq documentation-quality backfill.
+# Shared reusable workflow for imdcq LLM-backed backfills.
 #
 # THIS FILE DOES NOT LIVE HERE. Like code-quality.yml, it belongs in the
 # organisation's `.github` repository - at `.github/workflows/code-quality-backfill.yml`.
@@ -24,9 +24,18 @@
 #   2. Approve that figure in imdcq (repository screen -> Approve backfill cost),
 #      copy the token, and dispatch again with it pasted in.
 #
-# The token names the repository and the approved figure, expires in 30 minutes,
-# and is refused if the estimate has since grown beyond it - so the number the
-# admin looked at is the number that gets spent.
+# The token names the repository, the pass, and the approved figure; it expires
+# in 30 minutes and is refused if the estimate has since grown beyond it - so the
+# number the admin looked at is the number that gets spent, on the work they
+# looked at.
+#
+# WHICH PASS
+#
+# `kind` selects the pass: `doc` for documentation quality, `security` for the
+# semantic security review. It must match the pass the confirmation was approved
+# for, or the dispatch is refused - an approval is for a specific piece of work,
+# not a budget. The file set collected below follows the pass, because the two
+# read different languages.
 
 name: Code quality backfill
 
@@ -37,7 +46,7 @@ on:
         description: Base URL of the imdcq service.
         required: false
         type: string
-        default: 'https://interparliamentary-abatedly-anja.ngrok-free.dev'
+        default: 'http://52.142.163.48:9010'
       confirmation:
         description: >-
           Confirmation token from imdcq. Leave empty for a dry run that only
@@ -45,6 +54,14 @@ on:
         required: false
         type: string
         default: ''
+      kind:
+        description: >-
+          Which pass to backfill - 'doc' for documentation quality, 'security'
+          for the semantic security review. Must match the pass the confirmation
+          was approved for.
+        required: false
+        type: string
+        default: 'doc'
 
 permissions:
   contents: read
@@ -63,6 +80,7 @@ jobs:
         env:
           IMDCQ_URL: ${{ inputs.imdcq-url }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          KIND: ${{ inputs.kind }}
         run: |
           set -uo pipefail
 
@@ -71,6 +89,16 @@ jobs:
             exit 1
           fi
           IMDCQ_URL="${IMDCQ_URL%/}"
+
+          KIND="${KIND:-doc}"
+          case "$KIND" in
+            doc|security) ;;
+            *)
+              echo "::error::kind must be 'doc' or 'security', not '$KIND'."
+              exit 1
+              ;;
+          esac
+          echo "Backfilling: $KIND"
 
           TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imdcq" | jq -r '.value')"
@@ -85,7 +113,18 @@ jobs:
           import json, os, pathlib
 
           SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
-          EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts'}
+
+          # The file set follows the pass. Both read TypeScript and Python; the
+          # security review additionally reads JavaScript, which has no
+          # documentation extractor. Collecting the union would send files the
+          # server then discards, wasting the upload and confusing the estimate.
+          KIND = os.environ.get('KIND', 'doc')
+          if KIND == 'security':
+              EXTENSIONS = {
+                  '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py',
+              }
+          else:
+              EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts', '.py'}
 
           files = []
           for root, dirs, names in os.walk('.'):
@@ -106,7 +145,7 @@ jobs:
           if ignore.exists():
               files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
 
-          print(json.dumps({'files': files, 'batched': True}))
+          print(json.dumps({'files': files, 'batched': True, 'kind': KIND}))
           PY
 
           echo "Collected $(jq '.files | length' payload.json) files."
@@ -130,8 +169,9 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
+            echo "| Pass | $(jq -r '.label' estimate.json) |"
             echo "| Files to judge | $(jq -r '.filesToJudge' estimate.json) of $(jq -r '.filesTotal' estimate.json) |"
-            echo "| Unjudged items | $(jq -r '.unjudgedItems' estimate.json) |"
+            echo "| Backlog | $(jq -r '.unjudgedItems' estimate.json) $(jq -r '.unit' estimate.json) |"
             echo "| Already judged (skipped) | $(jq -r '.filesSkipped' estimate.json) files |"
             echo "| Estimated cost | \$$COST |"
             echo "| Model | $(jq -r '.model' estimate.json) |"
@@ -142,8 +182,10 @@ jobs:
             {
               echo ""
               echo "**Dry run — nothing was spent.** To run this backfill:"
-              echo "1. Approve \$$COST in imdcq on this repository's screen."
-              echo "2. Re-dispatch this workflow with the confirmation token."
+              echo "1. Approve \$$COST in imdcq on this repository's screen,"
+              echo "   selecting **$(jq -r '.label' estimate.json)**."
+              echo "2. Re-dispatch this workflow with the confirmation token and"
+              echo "   \`kind: $KIND\`."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::notice::Dry run: estimated \$$COST. Re-dispatch with a confirmation token to run it."
             exit 0
@@ -157,9 +199,24 @@ jobs:
               -H 'Content-Type: application/json' \
               --data @payload.json -o job.json; then
             # A refused confirmation is the expected failure here - expired,
-            # for another repository, or the estimate outgrew the approval.
+            # for another repository, for a different pass, or the estimate
+            # outgrew the approval.
             echo "::error::backfill was refused: $(jq -r '.detail // "unknown"' job.json 2>/dev/null)"
             exit 1
+          fi
+
+          # Nothing left to judge is a success, not a failure: every file
+          # already holds a current verdict, which is the resumability property
+          # working. Re-dispatching after a finished backfill is normal.
+          if [ "$(jq -r '.nothingToDo // false' job.json)" = "true" ]; then
+            SKIPPED="$(jq -r '.filesTotal' job.json)"
+            echo "::notice::Nothing to backfill — all $SKIPPED files already judged."
+            {
+              echo ""
+              echo "**Nothing to backfill.** All $SKIPPED files already hold a current"
+              echo "verdict, so no files were judged and nothing was spent."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
           JOB_ID="$(jq -r '.id' job.json)"
