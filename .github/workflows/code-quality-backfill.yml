@@ -36,6 +36,43 @@
 # for, or the dispatch is refused - an approval is for a specific piece of work,
 # not a budget. The file set collected below follows the pass, because the two
 # read different languages.
+#
+# THE CALLER BLOCK
+#
+# Participating repositories carry this, which is what puts both passes in the
+# dispatch form:
+#
+#   name: Code quality backfill
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         kind:
+#           description: 'Which pass to backfill'
+#           required: true
+#           type: choice
+#           options: [doc, security]
+#           default: doc
+#         confirmation:
+#           description: 'imdcq confirmation token (leave empty to estimate only)'
+#           required: false
+#   jobs:
+#     backfill:
+#       uses: inmydata/.github/.github/workflows/code-quality-backfill.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         kind: ${{ inputs.kind }}
+#         confirmation: ${{ inputs.confirmation }}
+#
+# `type: choice` rather than a free-text string. This workflow validates the
+# value either way, but a dropdown means a typo cannot reach it, and it puts the
+# two passes in front of whoever is dispatching - which is where they look.
+#
+# A caller omitting `kind` fails at dispatch. That is the point: it previously
+# defaulted to 'doc', so a repository whose caller never offered the input could
+# only ever backfill documentation, and a security approval pasted into it would
+# be refused for a reason that pointed at the wrong thing.
 
 name: Code quality backfill
 
@@ -55,13 +92,18 @@ on:
         type: string
         default: ''
       kind:
+        # Required, and deliberately without a default. A default would let a
+        # caller that forgot the input run the wrong pass quietly: the
+        # confirmation is minted for a specific pass, so a token approved for the
+        # security review would be refused while the caller looked correct, and
+        # the error would read as imdcq rejecting a valid token. Failing at
+        # dispatch instead names the actual fault.
         description: >-
           Which pass to backfill - 'doc' for documentation quality, 'security'
           for the semantic security review. Must match the pass the confirmation
           was approved for.
-        required: false
+        required: true
         type: string
-        default: 'doc'
 
 permissions:
   contents: read
@@ -90,9 +132,16 @@ jobs:
           fi
           IMDCQ_URL="${IMDCQ_URL%/}"
 
-          KIND="${KIND:-doc}"
-          case "$KIND" in
+          # No fallback. `kind` is a required input, so an empty value here means
+          # something upstream is wrong - and substituting 'doc' would run the
+          # documentation pass while the operator believed they were running the
+          # security one.
+          case "${KIND:-}" in
             doc|security) ;;
+            "")
+              echo "::error::kind is empty - the calling workflow must pass it. See the caller block at the top of this file."
+              exit 1
+              ;;
             *)
               echo "::error::kind must be 'doc' or 'security', not '$KIND'."
               exit 1
@@ -118,7 +167,10 @@ jobs:
           # security review additionally reads JavaScript, which has no
           # documentation extractor. Collecting the union would send files the
           # server then discards, wasting the upload and confusing the estimate.
-          KIND = os.environ.get('KIND', 'doc')
+          # Already validated by the shell above, so this reads it rather than
+          # defaulting - a default here would silently disagree with the pass the
+          # rest of the job is running.
+          KIND = os.environ['KIND']
           if KIND == 'security':
               EXTENSIONS = {
                   '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py',
