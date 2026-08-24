@@ -144,6 +144,10 @@ jobs:
             exit 0
           fi
 
+          # Tolerate a trailing slash, which would otherwise produce a double
+          # slash in the request path.
+          IMDCQ_URL="${IMDCQ_URL%/}"
+
           TOKEN="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=imdcq" | jq -r '.value')"
 
@@ -158,14 +162,35 @@ jobs:
           import json, os, pathlib
 
           SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
-          EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts'}
+
+          # Source the checks parse. Python is included because the documentation
+          # presence pass and the security review both read it; JavaScript because
+          # the security review does. Sending less than this does not make a check
+          # fail - it makes it report a confident figure about a subset, which is
+          # worse.
+          EXTENSIONS = {
+              '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.py',
+          }
+
+          # Files the skill compliance check reads rather than parses: manifests,
+          # configuration and the layout itself. Named individually because a
+          # whole-repository upload would be large and mostly irrelevant.
+          NAMED = {
+              'pyproject.toml', 'package.json', 'tsconfig.json', 'setup.py',
+              'go.mod', '.gitignore', 'README.md', '.imdcqignore',
+          }
 
           files = []
           for root, dirs, names in os.walk('.'):
               dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith('.')]
               for name in names:
                   path = pathlib.Path(root, name)
-                  if path.suffix not in EXTENSIONS or path.name.endswith('.d.ts'):
+                  wanted = (
+                      (path.suffix in EXTENSIONS and not path.name.endswith('.d.ts'))
+                      or path.name in NAMED
+                      or path.suffix == '.csproj'
+                  )
+                  if not wanted:
                       continue
                   try:
                       files.append({
@@ -175,8 +200,13 @@ jobs:
                   except (UnicodeDecodeError, OSError):
                       continue
 
+          # `.imdcqignore` is already picked up by NAMED above; this remains as
+          # the belt-and-braces path for a repository keeping it somewhere the
+          # walk skips. Deduplicated, because sending a file twice would double
+          # its items in the denominator.
+          seen = {f['path'] for f in files}
           ignore = pathlib.Path('.imdcqignore')
-          if ignore.exists():
+          if ignore.exists() and '.imdcqignore' not in seen:
               files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
 
           print(json.dumps({
@@ -199,6 +229,16 @@ jobs:
             jq '.report' response.json > reports/imdcq.json
             echo "imdcq measures:"
             jq -c '.measures' response.json
+
+            # A 200 with no measures means a check failed server-side and the
+            # orchestrator degraded gracefully. Without this the run is green,
+            # the dashboard stays empty, and nothing says why.
+            jq -r '.warnings[]? | "::warning::imdcq: \(.)"' response.json
+            if [ "$(jq '.measures | length' response.json)" -eq 0 ]; then
+              echo "::warning::imdcq returned no measures. Check that Node and the"\
+                   "extractor's dependencies are installed on the imdcq host"\
+                   "(npm install in tools/tsdoc), and see the service log."
+            fi
           else
             # Fail open: keep the empty report and let the scanner proceed.
             echo "::warning::imdcq analysis failed; continuing with an empty report"
