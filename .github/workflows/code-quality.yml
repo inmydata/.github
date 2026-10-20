@@ -45,15 +45,24 @@ on:
         # or Enterprise on private repositories, and per-repository variables
         # would mean configuring this in every calling repo. The URL is not a
         # secret, so holding it here costs nothing.
-        # SET THIS before publishing the workflow. It must be a URL the runner
-        # can actually reach: GitHub-hosted runners are on the public internet,
-        # so an internal-only host will not resolve however it is spelled. If
-        # imdcq is not publicly reachable, run this job on a self-hosted runner
-        # inside the network instead (change `runs-on` below).
+        # It must be a URL the runner can actually reach: GitHub-hosted runners
+        # are on the public internet, so an internal-only host will not resolve
+        # however it is spelled. If imdcq is not publicly reachable, run this job
+        # on a self-hosted runner inside the network instead (change `runs-on`).
         description: Base URL of the imdcq service. Defaults to the shared instance.
         required: false
         type: string
-        default: 'https://interparliamentary-abatedly-anja.ngrok-free.dev'
+        default: 'https://imdcq.inmydata.com'
+      sonar-host-url:
+        # The SonarQube address, held here for the same reason as imdcq-url: it
+        # is not a secret, and organisation secrets are unavailable to private
+        # repositories on GitHub's Free plan, so a secret would have to be set in
+        # every calling repository. A repository's own SONAR_HOST_URL secret, if
+        # it has one, still takes precedence.
+        description: Base URL of the SonarQube server. Defaults to the shared instance.
+        required: false
+        type: string
+        default: 'https://sonar.inmydata.com'
       project-key:
         description: SonarQube project key. Defaults to the repository name.
         required: false
@@ -65,6 +74,8 @@ on:
     # SONAR_TOKEN is required, but not provided while calling" even when the
     # repository defines it. Marking them optional lets inherit supply them, and
     # the preflight step below fails with a message that says what to do.
+    #
+    # SONAR_HOST_URL is only an optional override of the sonar-host-url input.
     secrets:
       SONAR_TOKEN:
         required: false
@@ -95,18 +106,13 @@ jobs:
       - name: Check Sonar secrets are present
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
-          missing=""
-          [ -z "${SONAR_TOKEN:-}" ] && missing="$missing SONAR_TOKEN"
-          [ -z "${SONAR_HOST_URL:-}" ] && missing="$missing SONAR_HOST_URL"
-          if [ -n "$missing" ]; then
-            echo "::error::Missing secret(s):$missing in ${GITHUB_REPOSITORY}."\
+          if [ -z "${SONAR_TOKEN:-}" ]; then
+            echo "::error::Missing secret SONAR_TOKEN in ${GITHUB_REPOSITORY}."\
                  "'secrets: inherit' passes the CALLING repository's secrets - secrets"\
                  "defined on the .github repository that hosts this workflow are never"\
-                 "used. Define them as organisation secrets on the inmydata org (with"\
-                 "this repository in scope under the secret's repository access policy),"\
-                 "or as repository secrets on ${GITHUB_REPOSITORY} itself."
+                 "used. Add SONAR_TOKEN as a repository secret on ${GITHUB_REPOSITORY}"\
+                 "(Settings -> Secrets and variables -> Actions)."
             exit 1
           fi
 
@@ -249,7 +255,7 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || inputs.sonar-host-url }}
         with:
           args: >
             -Dsonar.projectKey=${{ inputs.project-key || github.event.repository.name }}
