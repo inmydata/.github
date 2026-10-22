@@ -27,19 +27,32 @@
 # repository being analysed: a `./.github/workflows/...` reference inside this
 # file resolves to the .github repository, not the caller, and `uses:` cannot be
 # built from an expression. So the caller runs its own tests, in a job before
-# this one in the same workflow run, and hands the reports over as an artifact:
+# this one in the same workflow run, and hands the reports over as an artifact.
+#
+# The tests run only when Code Quality is started by hand, to save Actions
+# minutes (ADR-014). A push run instead reuses the last hand-run report through
+# code-quality-last-coverage.yml, because SonarQube keeps no coverage between
+# analyses and would otherwise drop back to 0% on every push:
 #
 #   jobs:
 #     coverage:
+#       if: github.event_name == 'workflow_dispatch'
 #       uses: ./.github/workflows/test-coverage.yml
+#     last-coverage:
+#       if: github.event_name != 'workflow_dispatch'
+#       uses: inmydata/.github/.github/workflows/code-quality-last-coverage.yml@main
+#       permissions:
+#         contents: read
+#         actions: read
 #     quality:
-#       needs: coverage
-#       # Run the analysis even when tests fail: the quality figures are still
-#       # worth having, and imdcq must never cost a repository its analysis.
+#       needs: [coverage, last-coverage]
+#       # Run the analysis even when tests fail or are skipped: the quality
+#       # figures are still worth having, and imdcq must never cost a
+#       # repository its analysis.
 #       if: ${{ !cancelled() }}
 #       uses: inmydata/.github/.github/workflows/code-quality.yml@main
 #       with:
-#         coverage-artifact: coverage-reports
+#         coverage-artifact: ${{ github.event_name == 'workflow_dispatch' && 'coverage-reports' || 'coverage-reports-last' }}
 #       permissions:
 #         contents: read
 #         id-token: write
@@ -113,8 +126,8 @@ on:
         # before this input existed - so adding it changes nothing for a caller
         # that does not set it.
         description: >
-          Name of an artifact, uploaded earlier in the same run, holding a
-          coverage-reports/ directory (see TEST COVERAGE above).
+          Name of an artifact, uploaded earlier in the same run, holding
+          coverage reports (see TEST COVERAGE above).
         required: false
         type: string
         default: ''
