@@ -1,0 +1,129 @@
+# Shared reusable workflow: reuse the last coverage report on runs that do not
+# measure coverage themselves.
+#
+# THIS FILE DOES NOT LIVE HERE. Like code-quality.yml, it belongs in the
+# organisation's `.github` repository, at
+# `.github/workflows/code-quality-last-coverage.yml`. It is committed here as
+# the reference copy to publish.
+#
+# WHY IT EXISTS (ADR-014)
+#
+# Running every test suite on every push to Development cost more GitHub Actions
+# minutes than the account allows, so coverage is measured only when Code
+# Quality is started by hand. But SonarQube keeps no coverage between analyses:
+# each one replaces the figure with whatever that run reported. A push run that
+# sent nothing would put coverage back to 0% until the next hand run.
+#
+# So a push run calls this instead of the tests. It finds the most recent
+# coverage report a hand-started run saved for the same branch, and uploads it
+# into this run under `reuse-as`, where code-quality.yml picks it up like any
+# other report. The figure then stays at its last measured value between hand
+# runs - describing the code as it was then, which the log says.A
+#
+# WHY IT IS A SEPARATE WORKFLOW
+#
+# Reading another run's artifacts needs `actions: read`. A reusable workflow
+# cannot hold a permission its caller does not grant, and asking for one fails
+# the whole call - so adding it to code-quality.yml would break every
+# repository whose caller grants only contents and id-token. Kept apart, only
+# the repositories that reuse coverage need to grant it.
+#
+# THE CALLER
+#
+#   jobs:
+#     coverage:
+#       if: github.event_name == 'workflow_dispatch'
+#       uses: ./.github/workflows/test-coverage.yml
+#     last-coverage:
+#       if: github.event_name != 'workflow_dispatch'
+#       uses: inmydata/.github/.github/workflows/code-quality-last-coverage.yml@main
+#       permissions:
+#         contents: read
+#         actions: read
+#     quality:
+#       needs: [coverage, last-coverage]
+#       if: ${{ !cancelled() }}
+#       uses: inmydata/.github/.github/workflows/code-quality.yml@main
+#       with:
+#         coverage-artifact: ${{ github.event_name == 'workflow_dispatch' && 'coverage-reports' || 'coverage-reports-last' }}
+#       permissions:
+#         contents: read
+#         id-token: write
+#       secrets: inherit
+#
+# The hand-run report has to outlive the gap between hand runs, so the
+# repository's test-coverage.yml keeps its upload for 90 days rather than one.
+
+name: Last coverage
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        # Only test-coverage.yml uploads under this name, and it runs only when
+        # started by hand - so any artifact found is a real measurement, never
+        # an earlier copy made by this workflow.
+        description: Name of the artifact hand-started runs upload their coverage reports under.
+        required: false
+        type: string
+        default: 'coverage-reports'
+      reuse-as:
+        # Deliberately different from `artifact`, for the reason above: a copy
+        # saved under the original name would be found next time and reported
+        # as if measured on the day it was copied.
+        description: Name to upload the reused reports under, for code-quality.yml to read.
+        required: false
+        type: string
+        default: 'coverage-reports-last'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    # Never costs the analysis. With no report to reuse, SonarQube shows 0%,
+    # which is what happened before coverage was added at all.
+    continue-on-error: true
+    steps:
+      - name: Find and fetch the last coverage report
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ inputs.artifact }}
+          BRANCH: ${{ github.ref_name }}
+          DIR: ${{ runner.temp }}/last-coverage
+        run: |
+          set +e
+          # Newest unexpired artifact of that name from this branch. Filtering
+          # on the branch keeps a feature branch's report off Development's
+          # figure.
+          found="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${NAME}&per_page=100" \
+            | jq -r --arg b "$BRANCH" '
+                [.artifacts[] | select(.expired | not) | select(.workflow_run.head_branch == $b)]
+                | sort_by(.created_at) | last
+                | select(. != null)
+                | "\(.workflow_run.id) \(.created_at) \(.workflow_run.head_sha)"')"
+
+          if [ -z "$found" ]; then
+            echo "::warning::No coverage report from a hand-started run on ${BRANCH} in the last 90 days, so SonarQube will show 0%. Run Code Quality by hand (Actions -> Code Quality -> Run workflow) to measure it."
+            exit 0
+          fi
+
+          read -r run_id created sha <<< "$found"
+          if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$NAME" --dir "$DIR"; then
+            echo "::warning::Found coverage from run ${run_id} but could not download it; SonarQube will show 0%."
+            exit 0
+          fi
+
+          echo "::notice::Reusing coverage measured by run ${run_id} on ${created}, at commit ${sha:0:7}. Code changed since then is not reflected until Code Quality is run by hand again."
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Hand the report to the SonarQube job
+        if: ${{ steps.fetch.outputs.found == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.reuse-as }}
+          path: ${{ runner.temp }}/last-coverage
+          retention-days: 1
