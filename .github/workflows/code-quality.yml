@@ -16,6 +16,46 @@
 #         id-token: write
 #       secrets: inherit
 #
+# TEST COVERAGE
+#
+# SonarQube does not run tests. It reads coverage reports the build has already
+# written, and with none it records every coverable line as uncovered - 0%,
+# which reads as "nothing is tested" when it means "nothing was measured".
+#
+# This workflow cannot run a repository's tests itself, because every repository
+# installs and tests differently. Nor can it call a test workflow held in the
+# repository being analysed: a `./.github/workflows/...` reference inside this
+# file resolves to the .github repository, not the caller, and `uses:` cannot be
+# built from an expression. So the caller runs its own tests, in a job before
+# this one in the same workflow run, and hands the reports over as an artifact:
+#
+#   jobs:
+#     coverage:
+#       uses: ./.github/workflows/test-coverage.yml
+#     quality:
+#       needs: coverage
+#       # Run the analysis even when tests fail: the quality figures are still
+#       # worth having, and imdcq must never cost a repository its analysis.
+#       if: ${{ !cancelled() }}
+#       uses: inmydata/.github/.github/workflows/code-quality.yml@main
+#       with:
+#         coverage-artifact: coverage-reports
+#       permissions:
+#         contents: read
+#         id-token: write
+#       secrets: inherit
+#
+# The artifact must hold a `coverage-reports/` directory with any of these,
+# named exactly so - which of them exist decides which scanner settings are
+# passed, so a repository with only Python sends only `python.xml`:
+#
+#   coverage-reports/python.xml     coverage.py XML (pytest --cov-report=xml:...)
+#   coverage-reports/lcov.info      LCOV for TypeScript/JavaScript, with SF: paths
+#                                   relative to the repository root
+#   coverage-reports/opencover.xml  OpenCover XML for C# (coverlet)
+#
+# The reference test-coverage.yml beside this file shows how to produce them.
+#
 # The caller MUST grant id-token: write. The permissions block below is a ceiling
 # this workflow operates within, not a request that escalates - a reusable
 # workflow cannot hold more permission than its caller. Omitting it fails with
@@ -65,6 +105,16 @@ on:
         default: 'https://sonar.inmydata.com'
       project-key:
         description: SonarQube project key. Defaults to the repository name.
+        required: false
+        type: string
+        default: ''
+      coverage-artifact:
+        # Empty means no coverage is sent, which is how every repository behaved
+        # before this input existed - so adding it changes nothing for a caller
+        # that does not set it.
+        description: >
+          Name of an artifact, uploaded earlier in the same run, holding a
+          coverage-reports/ directory (see TEST COVERAGE above).
         required: false
         type: string
         default: ''
@@ -251,6 +301,45 @@ jobs:
             head -c 500 response.json 2>/dev/null || true
           fi
 
+      # Fail open, like the imdcq step: a missing artifact - tests that crashed
+      # before writing a report, say - costs the coverage figure, not the scan.
+      - name: Download coverage reports
+        if: ${{ inputs.coverage-artifact != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.coverage-artifact }}
+          # Outside the checkout, so the scanner does not index the reports
+          # themselves as XML source and raise issues against them.
+          path: ${{ runner.temp }}/imdcq-coverage
+
+      # Only the reports that exist are named. Pointing the scanner at a missing
+      # file only logs a warning, but it would hide which languages actually
+      # reported - and the log line below is how anyone finds out.
+      #
+      # The artifact holds a coverage-reports/ directory, but download-artifact
+      # drops the common leading directory of what was uploaded, so the files
+      # may arrive with or without it. Both places are checked.
+      - name: Find coverage reports
+        id: coverage
+        env:
+          DIR: ${{ runner.temp }}/imdcq-coverage
+        run: |
+          [ -d "$DIR/coverage-reports" ] && DIR="$DIR/coverage-reports"
+          args=""
+          [ -f "$DIR/python.xml" ] && \
+            args="$args -Dsonar.python.coverage.reportPaths=$DIR/python.xml"
+          [ -f "$DIR/lcov.info" ] && \
+            args="$args -Dsonar.javascript.lcov.reportPaths=$DIR/lcov.info"
+          [ -f "$DIR/opencover.xml" ] && \
+            args="$args -Dsonar.cs.opencover.reportsPaths=$DIR/opencover.xml"
+          if [ -z "$args" ]; then
+            echo "No coverage reports; SonarQube will show coverage as 0%."
+          else
+            echo "Coverage reports:$args"
+          fi
+          echo "args=$args" >> "$GITHUB_OUTPUT"
+
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
@@ -261,6 +350,7 @@ jobs:
             -Dsonar.projectKey=${{ inputs.project-key || github.event.repository.name }}
             -Dsonar.externalIssuesReportPaths=reports/imdcq.json
             -Dsonar.analysis.imdcqRunId=${{ steps.run.outputs.id }}
+            ${{ steps.coverage.outputs.args }}
 
       # Deliberately NOT running sonarqube-quality-gate-action.
       #
