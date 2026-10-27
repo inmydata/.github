@@ -14,6 +14,7 @@
 #       permissions:
 #         contents: read
 #         id-token: write
+#         pull-requests: read
 #       secrets: inherit
 #
 # TEST COVERAGE
@@ -56,6 +57,7 @@
 #       permissions:
 #         contents: read
 #         id-token: write
+#         pull-requests: read
 #       secrets: inherit
 #
 # The artifact must hold a `coverage-reports/` directory with any of these,
@@ -78,6 +80,13 @@
 # permissions default is restrictive (Settings -> Actions -> General), or when
 # the caller declares a top-level permissions block that omits id-token - such a
 # block is exhaustive, so unlisted scopes drop to none.
+#
+# The caller MUST also grant pull-requests: read, for the same reason. It lets
+# this workflow trace a squash-merged pull request back to its original commits,
+# which are the ones Claude Code reported (ADR-017). ROLL IT OUT IN THIS ORDER:
+# first add it to every caller, which is harmless on its own, and only then
+# publish this file. Published first, it fails every caller that doesn't yet
+# grant it, before any step runs.
 #
 # Calling a reusable workflow from a private repository requires that
 # repository's Actions access settings to permit access from repositories in the
@@ -150,6 +159,9 @@ permissions:
   # Required for the OIDC token imdcq authenticates with. This is the whole of
   # the CI -> imdcq credential: short-lived, nothing to rotate (design SS7).
   id-token: write
+  # Read this repository's pull requests, to find a squash commit's original
+  # commits. See the rollout order above: every caller must grant it first.
+  pull-requests: read
 
 jobs:
   analyse:
@@ -194,6 +206,11 @@ jobs:
           IMDCQ_URL: ${{ inputs.imdcq-url }}
           PROJECT_KEY: ${{ inputs.project-key || github.event.repository.name }}
           RUN_ID: ${{ steps.run.outputs.id }}
+          # For tracing squash merges to their pull requests (ADR-017).
+          GH_TOKEN: ${{ github.token }}
+          # The branch's commit before this push: empty for a hand-started run,
+          # all zeros for a new branch.
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -uo pipefail
           mkdir -p reports
@@ -228,7 +245,7 @@ jobs:
           # Collect the sources imdcq's checks apply to. Excluded directories are
           # filtered here as well as server-side to keep the payload small.
           python3 - <<'PY' > payload.json
-          import json, os, pathlib
+          import json, os, pathlib, subprocess, sys, urllib.error, urllib.request
 
           SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
 
@@ -278,6 +295,90 @@ jobs:
           if ignore.exists() and '.imdcqignore' not in seen:
               files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
 
+          # The latest commits on the branch, newest first, each with the files
+          # it changed, so imdcq can tie the change to the Claude Code sessions
+          # that wrote it (ADR-017). imdcq cuts the list at the commit it last
+          # analysed, so this needn't know what that was. First parent only: on
+          # Development a merged pull request is one commit, and git compares a
+          # merge with its first parent, giving the files the merge brought in.
+          def recent_commits():
+              out = subprocess.run(
+                  ['git', 'log', '--first-parent', '-n', '100',
+                   '--format=%x1e%H%x1f%cI%x1f%ae', '--name-only', 'HEAD'],
+                  capture_output=True, text=True, check=True,
+              ).stdout
+              commits = []
+              for record in out.split('\x1e')[1:]:
+                  header, _, names = record.partition('\n')
+                  sha, committed_at, email = header.split('\x1f')
+                  commits.append({
+                      'sha': sha,
+                      'committedAt': committed_at,
+                      'authorEmail': email,
+                      'files': [n for n in names.splitlines() if n],
+                  })
+              return commits
+
+          # A squash commit's SHA is never one Claude made: Claude reported the
+          # pull request's original commits. So for each commit this push added,
+          # ask GitHub whether it came from a pull request, and if so send that
+          # pull request's commits. Only this push's commits are looked up, at
+          # most 30, to stay well inside the job token's API limit; a hand-started
+          # run looks up the newest five. Any failure, including a caller that
+          # doesn't grant pull-requests: read, just sends the commits without.
+          def github(path):
+              request = urllib.request.Request(
+                  f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}{path}",
+                  headers={
+                      'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                      'Accept': 'application/vnd.github+json',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  return json.load(response)
+
+          def pushed(commits):
+              before = os.environ.get('BEFORE_SHA', '')
+              shas = [c['sha'] for c in commits]
+              if before in shas:
+                  return commits[:shas.index(before)][:30]
+              return commits[:5]
+
+          def add_pull_requests(commits):
+              for commit in pushed(commits):
+                  try:
+                      merged = [p for p in github(f"/commits/{commit['sha']}/pulls") if p.get('merged_at')]
+                      if not merged:
+                          continue
+                      number = merged[0]['number']
+                      originals = []
+                      for page in (1, 2, 3):
+                          batch = github(f'/pulls/{number}/commits?per_page=100&page={page}')
+                          originals += batch
+                          if len(batch) < 100:
+                              break
+                  except (OSError, ValueError, KeyError, TypeError) as exc:
+                      print(f'::notice::imdcq: could not read pull requests ({exc});'
+                            ' sending commits without them', file=sys.stderr)
+                      return
+                  commit['pullRequest'] = number
+                  commit['pullRequestCommits'] = [
+                      {
+                          'sha': o['sha'],
+                          'committedAt': o['commit']['committer']['date'],
+                          'authorEmail': o['commit']['author']['email'],
+                      }
+                      for o in originals
+                  ]
+
+          try:
+              commits = recent_commits()
+              add_pull_requests(commits)
+          except (subprocess.CalledProcessError, ValueError) as exc:
+              print(f'::notice::imdcq: could not read the commit history ({exc})', file=sys.stderr)
+              commits = None
+
           print(json.dumps({
               'repositoryId': int(os.environ['GITHUB_REPOSITORY_ID']),
               'projectKey': os.environ['PROJECT_KEY'],
@@ -285,6 +386,7 @@ jobs:
               'commitSha': os.environ['GITHUB_SHA'],
               'runId': os.environ['RUN_ID'],
               'files': files,
+              'commits': commits,
           }))
           PY
 
