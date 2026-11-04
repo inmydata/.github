@@ -32,14 +32,15 @@
 # WHICH PASS
 #
 # `kind` selects the pass: `doc` for documentation quality, `security` for the
-# semantic security review. It must match the pass the confirmation was approved
-# for, or the dispatch is refused - an approval is for a specific piece of work,
-# not a budget. The file set collected below follows the pass, because the two
-# read different languages.
+# semantic security review, `doc_stale` for checking existing documentation
+# against its code (ADR-021). It must match the pass the confirmation was
+# approved for, or the dispatch is refused - an approval is for a specific piece
+# of work, not a budget. The file set collected below follows the pass, because
+# they read different files.
 #
 # THE CALLER BLOCK
 #
-# Participating repositories carry this, which is what puts both passes in the
+# Participating repositories carry this, which is what puts every pass in the
 # dispatch form:
 #
 #   name: Code quality backfill
@@ -50,7 +51,7 @@
 #           description: 'Which pass to backfill'
 #           required: true
 #           type: choice
-#           options: [doc, security]
+#           options: [doc, security, doc_stale]
 #           default: doc
 #         confirmation:
 #           description: 'imdcq confirmation token (leave empty to estimate only)'
@@ -67,7 +68,7 @@
 #
 # `type: choice` rather than a free-text string. This workflow validates the
 # value either way, but a dropdown means a typo cannot reach it, and it puts the
-# two passes in front of whoever is dispatching - which is where they look.
+# passes in front of whoever is dispatching - which is where they look.
 #
 # A caller omitting `kind` fails at dispatch. That is the point: it previously
 # defaulted to 'doc', so a repository whose caller never offered the input could
@@ -100,7 +101,8 @@ on:
         # dispatch instead names the actual fault.
         description: >-
           Which pass to backfill - 'doc' for documentation quality, 'security'
-          for the semantic security review. Must match the pass the confirmation
+          for the semantic security review, 'doc_stale' for checking existing
+          documentation against its code. Must match the pass the confirmation
           was approved for.
         required: true
         type: string
@@ -137,13 +139,13 @@ jobs:
           # documentation pass while the operator believed they were running the
           # security one.
           case "${KIND:-}" in
-            doc|security) ;;
+            doc|security|doc_stale) ;;
             "")
               echo "::error::kind is empty - the calling workflow must pass it. See the caller block at the top of this file."
               exit 1
               ;;
             *)
-              echo "::error::kind must be 'doc' or 'security', not '$KIND'."
+              echo "::error::kind must be 'doc', 'security' or 'doc_stale', not '$KIND'."
               exit 1
               ;;
           esac
@@ -163,10 +165,12 @@ jobs:
 
           SKIP = {'node_modules', '.git', '.next', 'dist', 'build', '__pycache__', 'vendor'}
 
-          # The file set follows the pass. Both read TypeScript and Python; the
+          # The file set follows the pass. All read TypeScript and Python; the
           # security review additionally reads JavaScript, which has no
           # documentation extractor. Collecting the union would send files the
           # server then discards, wasting the upload and confusing the estimate.
+          # The staleness pass also reads tsconfig.json, whose path aliases tell
+          # it which files import each module (ADR-021).
           # Already validated by the shell above, so this reads it rather than
           # defaulting - a default here would silently disagree with the pass the
           # rest of the job is running.
@@ -177,13 +181,17 @@ jobs:
               }
           else:
               EXTENSIONS = {'.ts', '.tsx', '.mts', '.cts', '.py'}
+          NAMED = {'tsconfig.json'} if KIND == 'doc_stale' else set()
 
           files = []
           for root, dirs, names in os.walk('.'):
               dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith('.')]
               for name in names:
                   path = pathlib.Path(root, name)
-                  if path.suffix not in EXTENSIONS or path.name.endswith('.d.ts'):
+                  wanted = (
+                      path.suffix in EXTENSIONS and not path.name.endswith('.d.ts')
+                  ) or path.name in NAMED
+                  if not wanted:
                       continue
                   try:
                       files.append({
@@ -197,7 +205,13 @@ jobs:
           if ignore.exists():
               files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})
 
-          print(json.dumps({'files': files, 'batched': True, 'kind': KIND}))
+          # The commit is recorded on the analysis row a completed backfill
+          # writes, so the step it causes in the trend names what was judged.
+          print(json.dumps({
+              'files': files,
+              'kind': KIND,
+              'commitSha': os.environ['GITHUB_SHA'],
+          }))
           PY
 
           echo "Collected $(jq '.files | length' payload.json) files."
