@@ -117,10 +117,9 @@ on:
         default: 'https://imdcq.inmydata.com'
       sonar-host-url:
         # The SonarQube address, held here for the same reason as imdcq-url: it
-        # is not a secret, and organisation secrets are unavailable to private
-        # repositories on GitHub's Free plan, so a secret would have to be set in
-        # every calling repository. A repository's own SONAR_HOST_URL secret, if
-        # it has one, still takes precedence.
+        # is not a secret, so a default here means no repository or organisation
+        # has to set anything. A repository's own SONAR_HOST_URL secret, if it
+        # has one, still takes precedence.
         description: Base URL of the SonarQube server. Defaults to the shared instance.
         required: false
         type: string
@@ -184,10 +183,11 @@ jobs:
         run: |
           if [ -z "${SONAR_TOKEN:-}" ]; then
             echo "::error::Missing secret SONAR_TOKEN in ${GITHUB_REPOSITORY}."\
-                 "'secrets: inherit' passes the CALLING repository's secrets - secrets"\
-                 "defined on the .github repository that hosts this workflow are never"\
-                 "used. Add SONAR_TOKEN as a repository secret on ${GITHUB_REPOSITORY}"\
-                 "(Settings -> Secrets and variables -> Actions)."
+                 "SONAR_TOKEN is an organisation secret on ${GITHUB_REPOSITORY_OWNER}."\
+                 "Check that its repository access includes ${GITHUB_REPOSITORY}"\
+                 "(organisation Settings -> Secrets and variables -> Actions -> SONAR_TOKEN)."\
+                 "Also check the caller passes 'secrets: inherit'. Secrets defined on the"\
+                 ".github repository that hosts this workflow are never used."
             exit 1
           fi
 
