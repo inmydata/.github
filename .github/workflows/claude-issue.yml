@@ -45,7 +45,8 @@
 #    - A fixed step, not Claude, then assigns the pull request to the person
 #      most likely to know the code: the issue's assignees if it has any;
 #      otherwise whoever last changed the files the pull request changes;
-#      otherwise whoever last committed to the base branch. Only people count,
+#      otherwise whoever committed most to the base branch in the last 7
+#      days; otherwise whoever last committed to it. Only people count,
 #      not bots such as the version stamp or Claude, and only people GitHub can
 #      assign, which rules out anyone who has lost access.
 # 3. `start-checks` holds only `actions: write` and runs no Claude. GitHub
@@ -295,6 +296,28 @@ jobs:
               2> /dev/null)
           }
 
+          # The person who committed most to the base branch in the last 7 days
+          # and can be assigned. A tie goes to whoever committed more recently.
+          # Counts the newest 100 commits in that time, which is all of them for
+          # all but the busiest repositories.
+          busiest_person() {
+            local count latest login since
+            since=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+            while read -r count latest login; do
+              if assignable "$login"; then
+                echo "$login"
+                return
+              fi
+            done < <(gh api -X GET "repos/$REPO/commits" -f sha="$BASE" -f since="$since" -F per_page=100 \
+              --jq '[.[] | select(.author != null and .author.type == "User")
+                     | {login: .author.login, date: .commit.author.date}]
+                    | group_by(.login)
+                    | map({login: .[0].login, count: length, latest: (map(.date) | max)})
+                    | sort_by([.count, .latest]) | reverse
+                    | .[] | "\(.count) \(.latest) \(.login)"' \
+              2> /dev/null)
+          }
+
           people=() reason=""
 
           # 1. Whoever is already assigned to the issue.
@@ -317,7 +340,16 @@ jobs:
             fi
           fi
 
-          # 3. Whoever last committed to the base branch.
+          # 3. Whoever committed most to the base branch in the last 7 days.
+          if [ ${#people[@]} -eq 0 ]; then
+            found=$(busiest_person)
+            if [ -n "$found" ]; then
+              people=("$found")
+              reason="who committed most to $BASE in the last 7 days"
+            fi
+          fi
+
+          # 4. Whoever last committed to the base branch, when nobody has in the last 7 days.
           if [ ${#people[@]} -eq 0 ]; then
             found=$(newest_person)
             if [ -n "$found" ]; then
