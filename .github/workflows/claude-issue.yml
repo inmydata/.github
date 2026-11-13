@@ -42,6 +42,12 @@
 #      workflow files.
 #    - The action makes its own checks too: it refuses people without write
 #      access, and bots not listed in `allowed_bots`.
+#    - A fixed step, not Claude, then assigns the pull request to the person
+#      most likely to know the code: the issue's assignees if it has any;
+#      otherwise whoever last changed the files the pull request changes;
+#      otherwise whoever last committed to the base branch. Only people count,
+#      not bots such as the version stamp or Claude, and only people GitHub can
+#      assign, which rules out anyone who has lost access.
 # 3. `start-checks` holds only `actions: write` and runs no Claude. GitHub
 #    doesn't start workflows from pushes made with GITHUB_TOKEN, so it starts the
 #    repository's check workflow on Claude's branch by hand. It only runs when
@@ -239,6 +245,95 @@ jobs:
             echo "::notice::Claude did not push $BRANCH."
             echo "pushed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Nobody is asked to look at a pull request a workflow opens, so give it
+      # to the person most likely to know the code. Never fails the run: a pull
+      # request nobody is assigned to is still a pull request.
+      - name: Assign the pull request
+        if: ${{ !cancelled() && steps.result.outputs.pushed == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          BASE: ${{ steps.base.outputs.name }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+
+          pr=$(gh pr list -R "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            echo "::notice::There is no open pull request from $BRANCH, so nobody was assigned."
+            exit 0
+          fi
+
+          # People GitHub can assign in this repository, checked once each.
+          declare -A can_assign=()
+          assignable() {
+            if [ -z "${can_assign[$1]+set}" ]; then
+              if gh api "repos/$REPO/assignees/$1" --silent > /dev/null 2>&1; then
+                can_assign[$1]=yes
+              else
+                can_assign[$1]=no
+              fi
+            fi
+            [ "${can_assign[$1]}" = yes ]
+          }
+
+          # The newest commit, from those the API returns, written by a person who
+          # can be assigned, as "date login". GitHub links a commit to its author's
+          # account where it can; bots have the type Bot.
+          newest_person() {
+            local date login
+            while read -r date login; do
+              if assignable "$login"; then
+                echo "$date $login"
+                return
+              fi
+            done < <(gh api -X GET "repos/$REPO/commits" -f sha="$BASE" "$@" -F per_page=50 \
+              --jq '.[] | select(.author != null and .author.type == "User") | "\(.commit.author.date) \(.author.login)"' \
+              2> /dev/null)
+          }
+
+          people=() reason=""
+
+          # 1. Whoever is already assigned to the issue.
+          while read -r login; do
+            [ -n "$login" ] && people+=("$login")
+          done < <(gh issue view "$ISSUE" -R "$REPO" --json assignees --jq '.assignees[].login')
+          [ ${#people[@]} -gt 0 ] && reason="the issue's assignees"
+
+          # 2. Whoever last changed the files the pull request changes. A file
+          #    Claude created has no history, so it adds nobody.
+          if [ ${#people[@]} -eq 0 ]; then
+            best=""
+            while read -r file; do
+              found=$(newest_person -f path="$file")
+              if [ -n "$found" ] && [[ "$found" > "$best" ]]; then best="$found"; fi
+            done < <(gh pr view "$pr" -R "$REPO" --json files --jq '.files[].path')
+            if [ -n "$best" ]; then
+              people=("${best#* }")
+              reason="the last person to change the files it changes"
+            fi
+          fi
+
+          # 3. Whoever last committed to the base branch.
+          if [ ${#people[@]} -eq 0 ]; then
+            found=$(newest_person)
+            if [ -n "$found" ]; then
+              people=("${found#* }")
+              reason="the last person to commit to $BASE"
+            fi
+          fi
+
+          if [ ${#people[@]} -eq 0 ]; then
+            echo "::notice::Found nobody to assign pull request #$pr to."
+            exit 0
+          fi
+          args=()
+          for login in "${people[@]}"; do args+=(-f "assignees[]=$login"); done
+          gh api -X POST "repos/$REPO/issues/$pr/assignees" "${args[@]}" --silent
+          echo "::notice::Assigned pull request #$pr to ${people[*]}, $reason."
 
   start-checks:
     needs: claude
