@@ -201,6 +201,20 @@ jobs:
                   except (UnicodeDecodeError, OSError):
                       continue
 
+          # The security run also measures GitHub Actions workflows, which the
+          # walk above skips with every dot-directory. Without them, a finished
+          # security backfill would drop the pull_request_target findings that a
+          # push analysis counts. They are never sent to the judge, so they cost
+          # nothing.
+          if KIND == 'security':
+              for path in sorted(pathlib.Path('.github/workflows').glob('*')):
+                  if path.suffix not in ('.yml', '.yaml') or not path.is_file():
+                      continue
+                  try:
+                      files.append({'path': path.as_posix(), 'content': path.read_text(encoding='utf-8')})
+                  except (UnicodeDecodeError, OSError):
+                      continue
+
           ignore = pathlib.Path('.imdcqignore')
           if ignore.exists():
               files.append({'path': '.imdcqignore', 'content': ignore.read_text(encoding='utf-8')})

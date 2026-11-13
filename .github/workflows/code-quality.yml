@@ -286,6 +286,18 @@ jobs:
                   except (UnicodeDecodeError, OSError):
                       continue
 
+          # GitHub Actions workflows, which the walk above skips with every
+          # dot-directory. The security check reports any that run on
+          # pull_request_target. GitHub ignores subfolders of this directory, so
+          # only the files directly in it are sent.
+          for path in sorted(pathlib.Path('.github/workflows').glob('*')):
+              if path.suffix not in ('.yml', '.yaml') or not path.is_file():
+                  continue
+              try:
+                  files.append({'path': path.as_posix(), 'content': path.read_text(encoding='utf-8')})
+              except (UnicodeDecodeError, OSError):
+                  continue
+
           # `.imdcqignore` is already picked up by NAMED above; this remains as
           # the belt-and-braces path for a repository keeping it somewhere the
           # walk skips. Deduplicated, because sending a file twice would double
