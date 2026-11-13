@@ -55,8 +55,14 @@
 #
 # ALSO NEEDED, ONCE
 #
-# - The organisation secret CLAUDE_API_KEY (already used by the security review).
+# - The secret CLAUDE_API_KEY, visible to the calling repository. An organisation
+#   secret or a repository secret both work.
 # - The organisation variable CLAUDE_TRUSTED_PEOPLE.
+# - The organisation variable CLAUDE_WORKSPACE_ID (wrkspc_...), if the key
+#   belongs to an Anthropic workspace. Such a key is refused on the first call,
+#   in well under a second, unless every request names the workspace. The
+#   workspace id isn't secret, so it's a variable. Leave it unset for a key that
+#   needs no workspace.
 # - "Allow GitHub Actions to create and approve pull requests" (organisation or
 #   repository Settings -> Actions -> General). Without it Claude can push its
 #   branch but not open the pull request.
@@ -178,6 +184,12 @@ jobs:
         env:
           # For the gh commands Claude is allowed to run.
           GH_TOKEN: ${{ github.token }}
+          # Names the Anthropic workspace on every request, when the key needs one.
+          # Not the action's anthropic_workspace_id input: the action only uses
+          # that for workload identity federation, never with an API key. Claude
+          # Code adds these headers itself, and the action passes its environment
+          # through. Empty, so no header at all, when the variable is unset.
+          ANTHROPIC_CUSTOM_HEADERS: "${{ vars.CLAUDE_WORKSPACE_ID && format('anthropic-workspace-id: {0}', vars.CLAUDE_WORKSPACE_ID) || '' }}"
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           # The job's own token, so Claude's GitHub App is never used.
